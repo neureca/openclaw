@@ -5,7 +5,7 @@ import type { CronJob } from "../types.js";
  * on top of per-provider/per-agent timeouts to prevent one stuck job from
  * wedging the entire cron lane.
  */
-export const DEFAULT_JOB_TIMEOUT_MS = 10 * 60_000; // 10 minutes
+export const DEFAULT_JOB_TIMEOUT_MS = 5 * 60_000; // 5 minutes
 
 /**
  * Agent turns can legitimately run much longer than generic cron jobs.

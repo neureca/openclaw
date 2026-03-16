@@ -1,4 +1,6 @@
+import { execFile as execFileCb } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { ExecAsk, ExecHost, ExecSecurity } from "../infra/exec-approvals.js";
@@ -85,6 +87,8 @@ export const DEFAULT_PATH =
   process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const DEFAULT_NOTIFY_TAIL_CHARS = 400;
 const DEFAULT_NOTIFY_SNIPPET_CHARS = 180;
+const execFile = promisify(execFileCb);
+const RTK_REWRITE_TIMEOUT_MS = 1500;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 export const DEFAULT_APPROVAL_REQUEST_TIMEOUT_MS = 130_000;
 const DEFAULT_APPROVAL_RUNNING_NOTICE_MS = 10_000;
@@ -218,6 +222,43 @@ export function applyShellPath(env: Record<string, string>, shellPath?: string |
   }
 }
 
+async function maybeRewriteExecCommandWithRtk(opts: {
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  warnings: string[];
+}): Promise<string> {
+  const input = opts.command.trim();
+  if (!input || input.startsWith("rtk ")) {
+    return opts.command;
+  }
+  try {
+    const { stdout } = await execFile("rtk", ["rewrite", input], {
+      cwd: opts.cwd,
+      env: opts.env,
+      timeout: RTK_REWRITE_TIMEOUT_MS,
+      maxBuffer: 128 * 1024,
+      windowsHide: true,
+    });
+    const rewritten = stdout.trim();
+    if (!rewritten || rewritten === input) {
+      return opts.command;
+    }
+    return rewritten;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+    if (
+      message.includes("ENOENT") ||
+      message.includes("Command failed") ||
+      message.includes("timed out")
+    ) {
+      return opts.command;
+    }
+    opts.warnings.push(`RTK rewrite skipped: ${message}`);
+    return opts.command;
+  }
+}
+
 function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
   if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) {
     return;
@@ -293,12 +334,20 @@ export async function runExecProcess(opts: {
 }): Promise<ExecProcessHandle> {
   const startedAt = Date.now();
   const sessionId = createSessionSlug();
-  const execCommand = opts.execCommand ?? opts.command;
+  let execCommand = opts.execCommand ?? opts.command;
   const supervisor = getProcessSupervisor();
   const shellRuntimeEnv: Record<string, string> = {
     ...opts.env,
     OPENCLAW_SHELL: "exec",
   };
+  if (!opts.sandbox) {
+    execCommand = await maybeRewriteExecCommandWithRtk({
+      command: execCommand,
+      cwd: opts.workdir,
+      env: shellRuntimeEnv,
+      warnings: opts.warnings,
+    });
+  }
 
   const session: ProcessSession = {
     id: sessionId,

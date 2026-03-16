@@ -3,6 +3,7 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { withTelegramApiErrorLogging } from "../api-logging.js";
 import { markdownToTelegramHtml } from "../format.js";
+import { isRecoverableTelegramNetworkError } from "../network-errors.js";
 import { buildInlineKeyboard } from "../send.js";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./helpers.js";
 
@@ -50,42 +51,47 @@ export async function sendTelegramWithThreadFallback<T>(params: {
     ? (err: unknown) => params.shouldLog!(err) && !shouldSuppressFirstErrorLog(err)
     : (err: unknown) => !shouldSuppressFirstErrorLog(err);
 
+  const attemptWithThreadHandling = async (
+    requestParams: Record<string, unknown>,
+    operation: string,
+  ): Promise<T> => {
+    try {
+      return await withTelegramApiErrorLogging({
+        operation,
+        runtime: params.runtime,
+        shouldLog: mergedShouldLog,
+        fn: () => params.send(requestParams),
+      });
+    } catch (err) {
+      if (!allowThreadlessRetry || !hasThreadId || !isTelegramThreadNotFoundError(err)) {
+        throw err;
+      }
+      const retryParams = removeMessageThreadIdParam(requestParams);
+      params.runtime.log?.(
+        `telegram ${operation}: message thread not found; retrying without message_thread_id`,
+      );
+      return await withTelegramApiErrorLogging({
+        operation: `${operation} (threadless retry)`,
+        runtime: params.runtime,
+        fn: () => params.send(retryParams),
+      });
+    }
+  };
+
   try {
-    return await withTelegramApiErrorLogging({
-      operation: params.operation,
-      runtime: params.runtime,
-      shouldLog: mergedShouldLog,
-      fn: () => params.send(params.requestParams),
-    });
+    return await attemptWithThreadHandling(params.requestParams, params.operation);
   } catch (err) {
-    if (!allowThreadlessRetry || !hasThreadId || !isTelegramThreadNotFoundError(err)) {
+    if (!isRecoverableTelegramNetworkError(err, { context: "send", allowMessageMatch: true })) {
       throw err;
     }
-    const retryParams = removeMessageThreadIdParam(params.requestParams);
     params.runtime.log?.(
-      `telegram ${params.operation}: message thread not found; retrying without message_thread_id`,
+      `telegram ${params.operation}: recoverable network error; retrying once: ${formatErrorMessage(err)}`,
     );
-    return await withTelegramApiErrorLogging({
-      operation: `${params.operation} (threadless retry)`,
-      runtime: params.runtime,
-      fn: () => params.send(retryParams),
-    });
+    return await attemptWithThreadHandling(
+      params.requestParams,
+      `${params.operation} (network retry)`,
+    );
   }
-}
-
-export function buildTelegramSendParams(opts?: {
-  replyToMessageId?: number;
-  thread?: TelegramThreadSpec | null;
-}): Record<string, unknown> {
-  const threadParams = buildTelegramThreadParams(opts?.thread);
-  const params: Record<string, unknown> = {};
-  if (opts?.replyToMessageId) {
-    params.reply_to_message_id = opts.replyToMessageId;
-  }
-  if (threadParams) {
-    params.message_thread_id = threadParams.message_thread_id;
-  }
-  return params;
 }
 
 export async function sendTelegramText(
@@ -169,4 +175,19 @@ export async function sendTelegramText(
     }
     throw err;
   }
+}
+
+export function buildTelegramSendParams(opts?: {
+  replyToMessageId?: number;
+  thread?: TelegramThreadSpec | null;
+}): Record<string, unknown> {
+  const threadParams = buildTelegramThreadParams(opts?.thread);
+  const params: Record<string, unknown> = {};
+  if (opts?.replyToMessageId) {
+    params.reply_to_message_id = opts.replyToMessageId;
+  }
+  if (threadParams) {
+    params.message_thread_id = threadParams.message_thread_id;
+  }
+  return params;
 }

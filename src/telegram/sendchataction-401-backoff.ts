@@ -1,4 +1,6 @@
 import { computeBackoff, sleepWithAbort, type BackoffPolicy } from "../infra/backoff.js";
+import { formatErrorMessage } from "../infra/errors.js";
+import { isRecoverableTelegramNetworkError } from "./network-errors.js";
 
 export type TelegramSendChatActionLogger = (message: string) => void;
 
@@ -104,6 +106,12 @@ export function createTelegramSendChatActionHandler({
         consecutive401Failures = 0;
       }
     } catch (error) {
+      if (isRecoverableTelegramNetworkError(error, { context: "send", allowMessageMatch: true })) {
+        logger(
+          `sendChatAction recoverable network error; skipping typing indicator: ${formatErrorMessage(error)}`,
+        );
+        return;
+      }
       if (is401Error(error)) {
         consecutive401Failures++;
 

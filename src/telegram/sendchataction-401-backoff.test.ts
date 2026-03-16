@@ -107,6 +107,23 @@ describe("createTelegramSendChatActionHandler", () => {
     expect(handler.isSuspended()).toBe(false);
   });
 
+  it("swallows recoverable network errors without tripping suspension", async () => {
+    const fn = vi.fn().mockRejectedValue(new Error("Network request for 'sendChatAction' failed!"));
+    const logger = vi.fn();
+    const handler = createTelegramSendChatActionHandler({
+      sendChatActionFn: fn,
+      logger,
+      maxConsecutive401: 2,
+    });
+
+    await expect(handler.sendChatAction(123, "typing")).resolves.toBeUndefined();
+
+    expect(handler.isSuspended()).toBe(false);
+    expect(logger).toHaveBeenCalledWith(
+      expect.stringContaining("recoverable network error; skipping typing indicator"),
+    );
+  });
+
   it("reset() clears suspension", async () => {
     const fn = vi.fn().mockRejectedValue(make401Error());
     const logger = vi.fn();
